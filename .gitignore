@@ -1,0 +1,6 @@
+mtool
+.ipynb_checkpoints/
+
+**/*.tgz
+**/*.png
+**/*.dot
