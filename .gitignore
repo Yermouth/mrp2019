@@ -1,6 +1,11 @@
-mtool
-.ipynb_checkpoints/
-
-**/*.tgz
+# MRP resources
+mtool/
+**/*.tgz*
 **/*.png
 **/*.dot
+
+# ipython notebook cache
+.ipynb_checkpoints/
+
+# python cache
+**/__pycache__/
