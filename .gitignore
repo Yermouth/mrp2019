@@ -9,3 +9,6 @@ mtool/
 
 # python cache
 **/__pycache__/
+
+# allennlp library
+src/mrp_library/
