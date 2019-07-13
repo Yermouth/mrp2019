@@ -1,11 +1,13 @@
 import os
 
 import matplotlib.pyplot as plt
+
 import networkx as nx
 from networkx.drawing.nx_agraph import to_agraph
 from PIL import Image
 
-HIDE_FIELD_SET = set(['id', 'anchors', 'source', 'target', 'label'])
+HIDE_FIELD_SET = set(['anchors', 'source', 'target', 'label'])
+UNKWOWN = 'UNKWOWN'
 
 
 def add_nodes_to_directed_graph(nodes, dg):
@@ -13,8 +15,8 @@ def add_nodes_to_directed_graph(nodes, dg):
         node_id = node.get('id', -1)
         dg.add_node(node_id)
         info_texts = [node.get('label', '')] + [
-            str((key[:3], value))
-            for key, value in node.items() if key not in HIDE_FIELD_SET
+            str((key[:3], value)) for key, value in node.items()
+            if key not in HIDE_FIELD_SET
         ]
         dg.nodes[node_id]['label'] = '\n'.join(info_texts)
 
@@ -25,8 +27,8 @@ def add_edges_to_directed_graph(edges, dg):
         edge_target = edge.get('target', -1)
         dg.add_edge(edge_source, edge_target)
         info_texts = [edge.get('label', '')] + [
-            str((key[:3], value))
-            for key, value in edge.items() if key not in HIDE_FIELD_SET
+            str((key[:3], value)) for key, value in edge.items()
+            if key not in HIDE_FIELD_SET
         ]
         dg[edge_source][edge_target]['label'] = '\n'.join(info_texts)
 
@@ -67,5 +69,5 @@ def directed_graph_to_graphviz_image(dg, image_path, layout='dot', verbose=0):
 def draw_mrp_graphviz(mrp_json, dataset_dir):
     mrp_id = mrp_json.get('id', UNKWOWN)
     dg = mrp_json_to_directed_graph(mrp_json)
-    image_path = os.path.join(dataset_dir, mrp_id)
-    directed_graph_to_graphviz_image(dg, image_name)
+    image_path = os.path.join(dataset_dir, '{}.png'.format(mrp_id))
+    directed_graph_to_graphviz_image(dg, image_path)

@@ -5,21 +5,26 @@ import re
 from collections import Counter, defaultdict, deque
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
-# logger.setLevel(logging.DEBUG)
 
-
-def mrp_json2parser_states(mrp_json, alignment={}):
+def mrp_json2parser_states(
+        mrp_json,
+        mrp_doc='',
+        tokenized_parse_nodes=[],
+        alignment={},
+):
     framework = mrp_json.get('framework', '')
     nodes = mrp_json.get('nodes', [])
     num_nodes = len(nodes)
     edges = mrp_json.get('edges', [])
     top_node_ids = mrp_json.get('tops', [])
-    doc = mrp_json.get('input', '')
+    doc = mrp_doc or mrp_json.get('input', '')
+    if not doc:
+        raise ValueError
 
     node_id2node = {node.get('id', -1): node for node in nodes}
-    edge_id2edge = {edge_id: edge for edge_id, edge in enumerate(edges)}
 
     parent_id2indegree = Counter()
     parent_id2child_id_set = defaultdict(set)
@@ -29,7 +34,6 @@ def mrp_json2parser_states(mrp_json, alignment={}):
     parent_child_id2edge_id_set = defaultdict(set)
     node_id2edge_id_set = defaultdict(set)
     node_id2neig_id_set = defaultdict(set)
-    token_id2node_id_set = defaultdict(set)
     node_id2node_id2direction = [[0] * num_nodes for _ in range(num_nodes)]
     top_oriented_edge_id_set = set()
 
@@ -45,6 +49,7 @@ def mrp_json2parser_states(mrp_json, alignment={}):
     # target as child
 
     for edge_id, edge in enumerate(edges):
+        edges[edge_id]['id'] = edge_id
         is_remote_edge = any([
             'properties' in edge and 'remote' in edge['properties'],
             # edge.get('label', '') == 'APPS.member',
@@ -55,12 +60,13 @@ def mrp_json2parser_states(mrp_json, alignment={}):
             logger.debug(('remote 1', edge_id))
             continue
 
-        edges[edge_id]['id'] = edge_id
         parent_id = edge.get('source')
         child_id = edge.get('target')
         node_id2edge_id_set[child_id].add(edge_id)
         node_id2edge_id_set[parent_id].add(edge_id)
         top_oriented_edge_id_set.add(edge_id)
+
+    edge_id2edge = {edge_id: edge for edge_id, edge in enumerate(edges)}
 
     top_oriented_edges = _top_oriented_edges(edges, edge_id2edge,
                                              top_oriented_edge_id_set,
@@ -109,16 +115,33 @@ def mrp_json2parser_states(mrp_json, alignment={}):
         framework,
         alignment,
     )
-    token_node_id_set = {node.get('id', -1) for node in token_nodes}
 
-    prev_anchor_from = 0
-    anchor2token_id = {}
-    for token_id, token in enumerate(sentence_spliter(doc)):
-        anchor_to = prev_anchor_from + len(token)
-        anchor2token_id[prev_anchor_from] = token_id
-        anchor2token_id[anchor_to] = token_id
-        prev_anchor_from = anchor_to + 1
-    logger.debug(pprint.pformat(('anchor2token_id', anchor2token_id)))
+    if tokenized_parse_nodes:
+        token_pos = 0
+        parse_nodes_anchors = []
+        char_pos2tokenized_node_id = []
+        for node_id, node in enumerate(tokenized_parse_nodes):
+            label = node.get('label')
+            label_size = len(label)
+            while doc[token_pos] == ' ':
+                token_pos += 1
+                char_pos2tokenized_node_id.append(node_id)
+            parse_nodes_anchors.append((token_pos, token_pos + label_size))
+            char_pos2tokenized_node_id.extend([node_id] * (label_size))
+            token_pos += label_size
+    else:
+        raise NotImplementedError
+
+    # prev_anchor_from = 0
+    # anchor2token_id = {}
+    # anchors = []
+    # for token_id, token in enumerate(sentence_spliter(doc)):
+    #     anchor_to = prev_anchor_from + len(token)
+    #     anchors.append((prev_anchor_from, anchor_to))
+    #     anchor2token_id[prev_anchor_from] = token_id
+    #     anchor2token_id[anchor_to] = token_id
+    #     prev_anchor_from = anchor_to + 1
+    # logger.debug(pprint.pformat(('anchor2token_id', anchor2token_id)))
 
     parser_states, actions = _generate_parser_action_states(
         framework,
@@ -133,9 +156,10 @@ def mrp_json2parser_states(mrp_json, alignment={}):
         parent_id2indegree,
         parent_id2child_id_set,
         child_id2parent_id_set,
-        token_node_id_set,
-        anchor2token_id,
         parent_child_id2edge_id_set,
+        parse_nodes_anchors,
+        char_pos2tokenized_node_id,
+        tokenized_parse_nodes,
     )
     # parser_states, actions = [], []
 
@@ -146,16 +170,16 @@ def mrp_json2parser_states(mrp_json, alignment={}):
         edge_id2edge,
         top_oriented_edges,
         token_nodes,
-        abstract_node_id_set,
+        # abstract_node_id_set,
         parent_id2indegree,
-        parent_id2child_id_set,
-        child_id2parent_id_set,
-        child_id2edge_id_set,
-        parent_id2edge_id_set,
-        token_node_id_set,
+        # parent_id2child_id_set,
+        # child_id2parent_id_set,
+        # child_id2edge_id_set,
+        # parent_id2edge_id_set,
+        # parent_child_id2edge_id_set,
+        parse_nodes_anchors,
+        char_pos2tokenized_node_id,
         actions,
-        anchor2token_id,
-        parent_child_id2edge_id_set,
     )
     return parser_states, meta_data
 
@@ -313,11 +337,10 @@ def _resolve_dependencys(nodes,
     return (token_nodes, abstract_node_id_set)
 
 
-IGNORE = 0  # IGNORE_CURRENT_TOKEN
-APPEND = 1  # APPEND_TO_CURRENT_GROUP
-RESOLVE = 2  # RESOLVE_GROUP
-COMBINE = 3  # COMBINE_GROUPS
-PENDING = 4  # ADD_TO_PENDDING_STACK
+ERROR = -1
+APPEND = 0  # APPEND_TO_CURRENT_GROUP
+RESOLVE = 1  # RESOLVE_GROUP
+IGNORE = 2  # IGNORE_CURRENT_TOKEN
 
 
 def sentence_spliter(doc):
@@ -337,9 +360,10 @@ def _generate_parser_action_states(
         parent_id2indegree,
         parent_id2child_id_set,
         child_id2parent_id_set,
-        token_node_id_set,
-        anchor2token_id,
         parent_child_id2edge_id_set,
+        parse_nodes_anchors,
+        char_pos2tokenized_node_id,
+        tokenized_parse_nodes,
 ):
     """Generate the parse state at each token step"""
 
@@ -355,17 +379,19 @@ def _generate_parser_action_states(
 
     token_node_queue = deque(token_nodes)
     prev_anchor_from = 0
+    prev_tokenized_node_id = 0
 
     complete_node_queue = deque()
     node_state = []
     token_stack = []
-    pending_token_stack = []
+    parse_token_stack = copy.deepcopy(tokenized_parse_nodes)
+    parse_token_stack.reverse()
     actions = []
 
     count = 0
     error = 0
 
-    while count <= 100 and (token_node_queue or complete_node_queue):
+    while count <= 1000 and (token_node_queue or complete_node_queue):
         count += 1
         action_state = []
         edge_state = []
@@ -379,18 +405,31 @@ def _generate_parser_action_states(
             node = token_node_queue.popleft()
             is_complete_parent = False
             if 'anchors' in node:
-                anchor = node.get('anchors')[0]
-                anchor_from = anchor.get('from', -1)
-                anchor_to = anchor.get('to', -1)
-                # if prev_anchor_from != anchor_from:
-                #     prev_token_id = anchor2token_id[prev_anchor_from]
-                #     curr_token_id = anchor2token_id[anchor_from]
-                #     num_ignored_tokens = curr_token_id - prev_token_id
-                #     for _ in range(num_ignored_tokens):
-                #         action_state.append((IGNORE, None))
-                prev_anchor_from = anchor_to + 1
+                anchors = node.get('anchors')
+                anchor_from = min(anchor.get('from', -1) for anchor in anchors)
+                anchor_to = max(anchor.get('to', -1) for anchor in anchors)
+                curr_tokenized_node_id = char_pos2tokenized_node_id[
+                    anchor_from]
+                logger.debug((
+                    'prev anchors',
+                    prev_tokenized_node_id,
+                ))
+                for tokenized_node_id in range(prev_tokenized_node_id,
+                                               curr_tokenized_node_id):
+                    logger.debug('ignore {}'.format(tokenized_node_id))
+                    action_state.append((IGNORE, None))
+
+                prev_tokenized_node_id = curr_tokenized_node_id + 1
+                logger.debug((
+                    'anchors',
+                    anchor_from,
+                    anchor_to,
+                    curr_tokenized_node_id,
+                    prev_tokenized_node_id,
+                ))
 
         curr_node_id = node.get('id', -1)
+        curr_node_label = node.get('label', '')
         num_childs = parent_id2indegree[curr_node_id]
         logger.debug(('curr_node_id', curr_node_id))
 
@@ -405,7 +444,6 @@ def _generate_parser_action_states(
         is_curr_not_seen = not curr_node_id in seen_node_id_set
         is_curr_not_visited = not curr_node_id in visited_node_id_set
         is_curr_not_resolved = not curr_node_id in resolved_node_id_set
-        is_curr_token_node = curr_node_id in token_node_id_set
         is_curr_not_abstract = not curr_node_id in abstract_node_id_set
 
         # if is_curr_complete and curr_node_id not in complete_node_id_set:
@@ -426,14 +464,13 @@ def _generate_parser_action_states(
             pass
         else:
             if is_curr_not_visited and is_curr_not_abstract:
-                # if is_curr_token_node and is_curr_not_seen:
                 action_state.append((APPEND, None))
                 node_state.append((curr_node_id, curr_node_id, None))
 
             if is_curr_complete and is_curr_not_resolved:
                 resolved_node_id_set.add(curr_node_id)
                 resolved_node = node_id2node[curr_node_id]
-                resolved_edges = []
+                resolved_edgess = []
 
                 num_pop = num_childs
                 if is_curr_not_abstract:
@@ -448,14 +485,18 @@ def _generate_parser_action_states(
                         logger.warning('pop empty node_state')
                         return [], []
                     new_state.append((root_id, last, childs))
-                    resolved_edges.append(
-                        (parent_child_id2edge_id_set[(curr_node_id, root_id)]))
+                    resolved_edges = []
+                    for edge_id in parent_child_id2edge_id_set[(curr_node_id,
+                                                                root_id)]:
+                        edge = edges[edge_id]
+                        resolved_edges.append(edge)
+                    resolved_edgess.append(resolved_edges)
                 new_state.reverse()
-                resolved_edges.reverse()
+                resolved_edgess.reverse()
 
                 node_state.append((curr_node_id, curr_node_id, new_state))
                 action_state.append((RESOLVE, (num_pop, resolved_node,
-                                               resolved_edges)))
+                                               resolved_edgess)))
 
         # elif curr_node_id not in seen_node_id_set:
         #     action_state.append((PENDING, None))
@@ -516,20 +557,24 @@ def _generate_parser_action_states(
         for action in action_state:
             action_type, params = action
             if action_type == APPEND:
-                token_stack.append(curr_node_id)
+                token = parse_token_stack.pop()
+                token_stack.append((curr_node_id, curr_node_label,
+                                    token.get('label')))
             elif action_type == RESOLVE:
                 (num_pop, resolved_node, resolved_edges) = params
+                new_token_group = []
                 while num_pop > 0 and token_stack:
-                    token_stack.pop()
+                    new_token_group.append(token_stack.pop())
                     num_pop -= 1
-                token_stack.append(curr_node_id)
-            elif action_type == PENDING:
-                pending_token_stack.append(curr_node_id)
+                new_token_group.reverse()
+                token_stack.append((curr_node_id, curr_node_label,
+                                    new_token_group))
+            elif action_type == IGNORE:
+                token = parse_token_stack.pop()
 
         actions.extend(action_state)
 
-        logger.debug(
-            pprint.pformat(('token stack', token_stack, pending_token_stack)))
+        logger.debug(pprint.pformat(('token stack', token_stack)))
         logger.debug(('visited states', seen_node_id_set, visited_node_id_set,
                       complete_node_id_set, resolved_node_id_set))
         parser_states.append((
@@ -540,7 +585,6 @@ def _generate_parser_action_states(
             complete_node_state,
             copy.deepcopy(node_state),
             copy.deepcopy(token_stack),
-            copy.deepcopy(pending_token_stack),
         ))
 
     if error:
