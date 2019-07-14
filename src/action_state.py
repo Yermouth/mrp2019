@@ -5,8 +5,9 @@ import re
 from collections import Counter, defaultdict, deque
 
 logger = logging.getLogger(__name__)
-# logger.setLevel(logging.INFO)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
+
+# logger.setLevel(logging.DEBUG)
 
 
 def mrp_json2parser_states(
@@ -123,10 +124,13 @@ def mrp_json2parser_states(
         for node_id, node in enumerate(tokenized_parse_nodes):
             label = node.get('label')
             label_size = len(label)
-            while doc[token_pos] == ' ':
+            while token_pos < len(doc) and doc[token_pos] == ' ':
                 token_pos += 1
                 char_pos2tokenized_node_id.append(node_id)
             parse_nodes_anchors.append((token_pos, token_pos + label_size))
+            if token_pos + label_size > len(doc):
+                logger.warning('doc too big')
+                return [], {}
             char_pos2tokenized_node_id.extend([node_id] * (label_size))
             token_pos += label_size
     else:
@@ -162,6 +166,13 @@ def mrp_json2parser_states(
         tokenized_parse_nodes,
     )
     # parser_states, actions = [], []
+    if not parser_states:
+        return [], {}
+
+    token_states, curr_node_ids = _simulate_actions(
+        actions,
+        tokenized_parse_nodes,
+    )
 
     meta_data = (
         doc,
@@ -179,6 +190,8 @@ def mrp_json2parser_states(
         # parent_child_id2edge_id_set,
         parse_nodes_anchors,
         char_pos2tokenized_node_id,
+        curr_node_ids,
+        token_states,
         actions,
     )
     return parser_states, meta_data
@@ -408,6 +421,8 @@ def _generate_parser_action_states(
                 anchors = node.get('anchors')
                 anchor_from = min(anchor.get('from', -1) for anchor in anchors)
                 anchor_to = max(anchor.get('to', -1) for anchor in anchors)
+                if anchor_from >= len(char_pos2tokenized_node_id):
+                    return [], []
                 curr_tokenized_node_id = char_pos2tokenized_node_id[
                     anchor_from]
                 logger.debug((
@@ -477,13 +492,19 @@ def _generate_parser_action_states(
                     num_pop += 1
 
                 new_state = []
-                for _ in range(num_pop):
+                root_stack_position = 0
+                logger.debug(('node_state', curr_node_id, node_state))
+                for stack_position in range(num_pop):
                     if node_state:
                         root_id, last, childs = node_state.pop()
                     else:
                         error = 1
                         logger.warning('pop empty node_state')
                         return [], []
+                    if root_id == curr_node_id:
+                        root_stack_position = stack_position
+                    logger.debug(('stack_position', stack_position, root_id,
+                                  last, childs, root_stack_position))
                     new_state.append((root_id, last, childs))
                     resolved_edges = []
                     for edge_id in parent_child_id2edge_id_set[(curr_node_id,
@@ -495,8 +516,9 @@ def _generate_parser_action_states(
                 resolved_edgess.reverse()
 
                 node_state.append((curr_node_id, curr_node_id, new_state))
-                action_state.append((RESOLVE, (num_pop, resolved_node,
-                                               resolved_edgess)))
+                action_state.append(
+                    (RESOLVE, (num_pop, num_pop - root_stack_position - 1,
+                               resolved_node, resolved_edgess)))
 
         # elif curr_node_id not in seen_node_id_set:
         #     action_state.append((PENDING, None))
@@ -557,20 +579,29 @@ def _generate_parser_action_states(
         for action in action_state:
             action_type, params = action
             if action_type == APPEND:
-                token = parse_token_stack.pop()
+                if parse_token_stack:
+                    token = parse_token_stack.pop()
+                else:
+                    return [], []
                 token_stack.append((curr_node_id, curr_node_label,
                                     token.get('label')))
             elif action_type == RESOLVE:
-                (num_pop, resolved_node, resolved_edges) = params
+                (num_pop, root_position, resolved_node,
+                 resolved_edges) = params
                 new_token_group = []
                 while num_pop > 0 and token_stack:
-                    new_token_group.append(token_stack.pop())
+                    if token_stack:
+                        new_token_group.append(token_stack.pop())
+                    else:
+                        return [], []
                     num_pop -= 1
                 new_token_group.reverse()
-                token_stack.append((curr_node_id, curr_node_label,
-                                    new_token_group))
+                token_stack.append((curr_node_id, new_token_group))
             elif action_type == IGNORE:
-                token = parse_token_stack.pop()
+                if parse_token_stack:
+                    token = parse_token_stack.pop()
+                else:
+                    return [], []
 
         actions.extend(action_state)
 
@@ -590,3 +621,37 @@ def _generate_parser_action_states(
     if error:
         return [], []
     return parser_states, actions
+
+
+def _simulate_actions(actions, tokenized_parse_nodes):
+    token_states = []
+    curr_node_ids = []
+    parse_token_stack = copy.deepcopy(tokenized_parse_nodes)
+    parse_token_stack.reverse()
+    token_stack = []
+    curr_node_id = -1
+
+    # Simulate actions
+    for action in actions:
+        logger.debug(('curr_node_id', curr_node_id))
+        action_type, params = action
+        if action_type == APPEND:
+            curr_node_id += 1
+            token = parse_token_stack.pop()
+            token_stack.append((curr_node_id, token.get('label')))
+        elif action_type == RESOLVE:
+            (num_pop, root_position, resolved_node, resolved_edges) = params
+            new_token_group = []
+            while num_pop > 0 and token_stack:
+                new_token_group.append(token_stack.pop())
+                num_pop -= 1
+            new_token_group.reverse()
+            root_node_id = new_token_group[root_position][0]
+            token_stack.append((root_node_id, new_token_group))
+        elif action_type == IGNORE:
+            curr_node_id += 1
+            token = parse_token_stack.pop()
+        token_states.append(copy.deepcopy(token_stack))
+        curr_node_ids.append(curr_node_id)
+
+    return token_states, curr_node_ids

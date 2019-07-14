@@ -66,12 +66,16 @@ class MrpDataset(object):
         self.framework2dataset2mrp_jsons = framework2dataset2mrp_jsons
         return frameworks, framework2dataset2mrp_jsons
 
-    def mrp_json_generator(self, ignore_framework_set={}):
+    def mrp_json_generator(self,
+                           ignore_framework_set={},
+                           ignore_dataset_set={}):
         for framework, dataset2mrp_jsons in self.framework2dataset2mrp_jsons.items(
         ):
             if framework in ignore_framework_set:
                 continue
             for dataset, mrp_jsons in dataset2mrp_jsons.items():
+                if dataset in ignore_dataset_set:
+                    continue
                 for mrp_json in mrp_jsons:
                     yield framework, dataset, mrp_json
 
