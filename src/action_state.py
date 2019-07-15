@@ -5,9 +5,8 @@ import re
 from collections import Counter, defaultdict, deque
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-# logger.setLevel(logging.DEBUG)
+# logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 
 def mrp_json2parser_states(
