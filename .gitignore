@@ -1,6 +1,20 @@
-mtool
-.ipynb_checkpoints/
-
-**/*.tgz
+# MRP resources
+mtool/
+**/*.tgz*
 **/*.png
 **/*.dot
+**/*.jsonl
+
+# Keep test fixtures data
+!src/tests/fixtures/*
+
+
+# ipython notebook cache
+.ipynb_checkpoints/
+
+# vscode config
+.vscode/
+
+# python cache
+**/__pycache__/
+
