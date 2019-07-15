@@ -8,6 +8,8 @@ logger = logging.getLogger(__name__)
 # logger.setLevel(logging.INFO)
 logger.setLevel(logging.DEBUG)
 
+UCCA_TOP_NODE_LABEL = '<UCCA-TOP-NODE>'
+
 
 def mrp_json2parser_states(
         mrp_json,
@@ -106,6 +108,17 @@ def mrp_json2parser_states(
     for parent_id, child_id_set in parent_id2child_id_set.items():
         parent_id2indegree[parent_id] = len(child_id_set)
 
+    # Propagate edge label to child for ucca
+    if framework == 'ucca':
+        for top_node_id in top_node_ids:
+            node_id2node[top_node_id]['propagate_label'] = UCCA_TOP_NODE_LABEL
+
+        for edge in top_oriented_edges:
+            child_id = edge.get('child')
+            edge_label = edge.get('label')
+            if child_id and node_id2node[child_id]:
+                node_id2node[child_id]['propagate_label'] = edge_label
+
     (token_nodes, abstract_node_id_set) = _resolve_dependencys(
         nodes,
         # edges,
@@ -169,6 +182,7 @@ def mrp_json2parser_states(
         return [], {}
 
     token_states, curr_node_ids = _simulate_actions(
+        framework,
         actions,
         tokenized_parse_nodes,
     )
@@ -622,13 +636,14 @@ def _generate_parser_action_states(
     return parser_states, actions
 
 
-def _simulate_actions(actions, tokenized_parse_nodes):
+def _simulate_actions(framework, actions, tokenized_parse_nodes):
     token_states = []
     curr_node_ids = []
     parse_token_stack = copy.deepcopy(tokenized_parse_nodes)
     parse_token_stack.reverse()
     token_stack = []
     curr_node_id = -1
+    abstract_node_id = len(parse_token_stack)
 
     # Simulate actions
     for action in actions:
@@ -640,12 +655,20 @@ def _simulate_actions(actions, tokenized_parse_nodes):
             token_stack.append((curr_node_id, token.get('label')))
         elif action_type == RESOLVE:
             (num_pop, root_position, resolved_node, resolved_edges) = params
+            num_childs = num_pop
             new_token_group = []
             while num_pop > 0 and token_stack:
                 new_token_group.append(token_stack.pop())
                 num_pop -= 1
             new_token_group.reverse()
-            root_node_id = new_token_group[root_position][0]
+            if framework == 'ucca':
+                if num_childs == 1:
+                    root_node_id = curr_node_id
+                else:
+                    root_node_id = abstract_node_id
+                    abstract_node_id += 1
+            else:
+                root_node_id = new_token_group[root_position][0]
             token_stack.append((root_node_id, new_token_group))
         elif action_type == IGNORE:
             curr_node_id += 1
