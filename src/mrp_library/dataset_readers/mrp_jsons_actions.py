@@ -190,7 +190,9 @@ class MRPDatasetActionReader(DatasetReader):
             if len(action_type_name_deque) > self.prev_action_window_size:
                 action_type_name_deque.popleft()
 
+            instance_type = 'action'
             yield self.text_to_instance(
+                instance_type,
                 framework,
                 parse_node_field_name2features,
                 token_node_field_name2features,
@@ -200,9 +202,23 @@ class MRPDatasetActionReader(DatasetReader):
                 token_state,
             )
 
+            if action_type_name == 'RESOLVE':
+                instance_type = 'resolve'
+                yield self.text_to_instance(
+                    instance_type,
+                    framework,
+                    parse_node_field_name2features,
+                    token_node_field_name2features,
+                    curr_node_id,
+                    action_type_name,
+                    action_params,
+                    token_state,
+                )
+
     @overrides
     def text_to_instance(
             self,
+            instance_type,
             framework,
             parse_node_field_name2features,
             token_node_field_name2features,
@@ -212,7 +228,10 @@ class MRPDatasetActionReader(DatasetReader):
             token_state,
     ) -> Instance:  # type: ignore
 
-        field_name2field = {'framework': MetadataField(framework)}
+        field_name2field = {
+            'instance_type': MetadataField(instance_type),
+            'framework': MetadataField(framework),
+        }
         for parse_node_field_name, features in parse_node_field_name2features.items(
         ):
             full_name = 'parse_node_{}s'.format(parse_node_field_name)
@@ -230,6 +249,7 @@ class MRPDatasetActionReader(DatasetReader):
 
         field_name2field['curr_node_id'] = MetadataField(curr_node_id)
         field_name2field['action_params'] = MetadataField(action_params)
+        field_name2field['action_type_name'] = MetadataField(action_type_name)
         field_name2field['token_state'] = MetadataField(token_state)
 
         for token_node_field_name, features in token_node_field_name2features.items(

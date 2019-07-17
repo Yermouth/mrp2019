@@ -1,1 +1,1 @@
-from mrp_library.models.generalizer import Generalizer
+from mrp_library.models.generalizer import ActionGeneralizer, Generalizer

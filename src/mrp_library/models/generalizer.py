@@ -17,15 +17,15 @@ from allennlp.training.metrics import CategoricalAccuracy
 from overrides import overrides
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-#logger.setLevel(logging.DEBUG)
+#logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 
 # @Model.register("generalizer")
 class ActionGeneralizer(Model):
     def __init__(
             self,
+            cuda_device,
             vocab: Vocabulary,
             field_type2embedder: Dict[str, TextFieldEmbedder],
             field_type2seq2vec_encoder: Dict[str, Seq2VecEncoder],
@@ -37,6 +37,18 @@ class ActionGeneralizer(Model):
                 str, TextFieldEmbedder]] = None,
     ) -> None:
         super(ActionGeneralizer, self).__init__(vocab, regularizer)
+        self.cuda_device = cuda_device
+        self.vocab = vocab
+        self.action_type2action_type_name = {
+            -1: 'ERROR',
+            0: 'APPEND',
+            1: 'RESOLVE',
+            2: 'IGNORE',
+        }
+        self.resolve_tensor = torch.tensor(vocab.get_token_index('RESOLVE'))
+        if cuda_device != -1:
+            self.resolve_tensor = self.resolve_tensor.cuda(cuda_device)
+
         self.field_types = [
             'word', 'pos', 'resolved', 'token_node_label',
             'token_node_prev_action'
@@ -56,8 +68,28 @@ class ActionGeneralizer(Model):
         initializer(self)
 
     @overrides
-    def forward(
+    def forward(self, instance_type, framework, *args, **kwargs):
+        if instance_type[0] == 'action':
+            return self._forward_action(instance_type, framework, *args,
+                                        **kwargs)
+        elif instance_type[0] == 'resolve':
+            return self._forward_resolve_framework(instance_type, framework,
+                                                   *args, **kwargs)
+        else:
+            raise NotImplementedError
+
+    def _forward_resolve_framework(self, instance_type, framework, *args,
+                                   **kwargs):
+        if framework[0] == 'dm':
+            return self._forward_resolve_dm(*args, **kwargs)
+        elif framework[0] == 'ucca':
+            return self._forward_resolve_ucca(*args, **kwargs)
+        else:
+            raise NotImplementedError
+
+    def _forward_action(
             self,
+            instance_type,
             framework,
             parse_node_labels: Dict[str, torch.LongTensor],
             parse_node_lemmas: Dict[str, torch.LongTensor],
@@ -65,6 +97,7 @@ class ActionGeneralizer(Model):
             parse_node_xposs: Dict[str, torch.LongTensor],
             curr_node_id,
             action_type: torch.LongTensor,
+            action_type_name,
             action_params,
             token_state,
             token_node_resolveds: Dict[str, torch.LongTensor],
@@ -74,7 +107,10 @@ class ActionGeneralizer(Model):
             token_node_childs,
     ) -> Dict[str, torch.Tensor]:
         assert all(fr == framework[0] for fr in framework)
+        # assert all(name == action_type_name[0] for name in action_type_name)
 
+        logger.debug(('instance_type', instance_type[0]))
+        logger.debug(('framework', framework[0]))
         logger.debug(('curr_node_id', curr_node_id[0]))
         logger.debug(('action_types', action_type[0]))
         logger.debug(('action_paramss', action_params[0]))
@@ -109,20 +145,75 @@ class ActionGeneralizer(Model):
                 embedded_field, field_mask)
             encoded_fields.append(encoded_field)
 
-        logits = self.classifier_feedforward(torch.cat(encoded_fields, dim=-1))
+        action_logits = self.classifier_feedforward(
+            torch.cat(encoded_fields, dim=-1))
+        action_probs, action_preds = action_logits.max(1)
+        action_resolve_preds = action_preds.eq_(self.resolve_tensor)
 
-        output_dict = {'logits': logits}
+        output_dict = {
+            'instance_type': instance_type[0],
+            'framework': framework[0],
+            'action_logits': action_logits,
+            'action_probs': action_probs,
+            'action_preds': action_preds,
+        }
         logger.debug(('output_dict', output_dict))
 
         if action_type is not None:
-            logger.debug(('logits', logits))
+            logger.debug(('action_logits', action_logits))
             logger.debug(('label', action_type))
-            action_type_loss = self.action_type_loss(logits, action_type)
+            action_type_loss = self.action_type_loss(action_logits,
+                                                     action_type)
             for metric in self.metrics.values():
-                metric(logits, action_type)
+                metric(action_logits, action_type)
             output_dict['loss'] = action_type_loss
 
         # raise NotImplementedError
+        return output_dict
+
+    def _forward_resolve_dm(
+            self,
+            instance_type,
+            framework,
+            parse_node_labels: Dict[str, torch.LongTensor],
+            parse_node_lemmas: Dict[str, torch.LongTensor],
+            parse_node_uposs: Dict[str, torch.LongTensor],
+            parse_node_xposs: Dict[str, torch.LongTensor],
+            curr_node_id,
+            action_type: torch.LongTensor,
+            action_type_name,
+            action_params,
+            token_state,
+            token_node_resolveds: Dict[str, torch.LongTensor],
+            token_node_labels: Dict[str, torch.LongTensor],
+            token_node_prev_actions: Dict[str, torch.LongTensor],
+            token_node_ids,
+            token_node_childs,
+    ):
+
+        output_dict = {}
+        return output_dict
+
+    def _forward_resolve_ucca(
+            self,
+            instance_type,
+            framework,
+            parse_node_labels: Dict[str, torch.LongTensor],
+            parse_node_lemmas: Dict[str, torch.LongTensor],
+            parse_node_uposs: Dict[str, torch.LongTensor],
+            parse_node_xposs: Dict[str, torch.LongTensor],
+            curr_node_id,
+            action_type: torch.LongTensor,
+            action_type_name,
+            action_params,
+            token_state,
+            token_node_resolveds: Dict[str, torch.LongTensor],
+            token_node_labels: Dict[str, torch.LongTensor],
+            token_node_prev_actions: Dict[str, torch.LongTensor],
+            token_node_ids,
+            token_node_childs,
+    ):
+        output_dict = {}
         return output_dict
 
     @overrides
@@ -132,7 +223,7 @@ class ActionGeneralizer(Model):
         Does a simple argmax over the class probabilities, converts indices to string labels, and
         adds a ``"label"`` key to the dictionary with the result.
         """
-        class_probabilities = F.softmax(output_dict['logits'], dim=-1)
+        class_probabilities = F.softmax(output_dict['action_logits'], dim=-1)
         output_dict['class_probabilities'] = class_probabilities
 
         predictions = class_probabilities.cpu().data.numpy()
