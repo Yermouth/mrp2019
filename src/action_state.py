@@ -5,10 +5,11 @@ import re
 from collections import Counter, defaultdict, deque
 
 logger = logging.getLogger(__name__)
-# logger.setLevel(logging.INFO)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
+#logger.setLevel(logging.DEBUG)
 
 UCCA_TOP_NODE_LABEL = '<UCCA-TOP-NODE>'
+UCCA_UNKNOWN_LABEL = '<UCCA-UNKNOWN>'
 
 
 def mrp_json2parser_states(
@@ -116,7 +117,7 @@ def mrp_json2parser_states(
         for edge in top_oriented_edges:
             child_id = edge.get('child')
             edge_label = edge.get('label')
-            if child_id and node_id2node[child_id]:
+            if child_id is not None and node_id2node[child_id]:
                 node_id2node[child_id]['propagate_label'] = edge_label
 
     (token_nodes, abstract_node_id_set) = _resolve_dependencys(
@@ -505,23 +506,25 @@ def _generate_parser_action_states(
                     num_pop += 1
 
                 new_state = []
-                root_stack_position = 0
+                resolved_node_stack_position = 0
                 logger.debug(('node_state', curr_node_id, node_state))
                 for stack_position in range(num_pop):
                     if node_state:
-                        root_id, last, childs = node_state.pop()
+                        resolved_node_id, last, childs = node_state.pop()
                     else:
                         error = 1
                         logger.warning('pop empty node_state')
                         return [], []
-                    if root_id == curr_node_id:
-                        root_stack_position = stack_position
-                    logger.debug(('stack_position', stack_position, root_id,
-                                  last, childs, root_stack_position))
-                    new_state.append((root_id, last, childs))
+
+                    if resolved_node_id == curr_node_id:
+                        resolved_node_stack_position = stack_position
+                    logger.debug(
+                        ('stack_position', stack_position, resolved_node_id,
+                         last, childs, resolved_node_stack_position))
+                    new_state.append((resolved_node_id, last, childs))
                     resolved_edges = []
-                    for edge_id in parent_child_id2edge_id_set[(curr_node_id,
-                                                                root_id)]:
+                    for edge_id in parent_child_id2edge_id_set[(
+                            curr_node_id, resolved_node_id)]:
                         edge = edges[edge_id]
                         resolved_edges.append(edge)
                     resolved_edgess.append(resolved_edges)
@@ -530,12 +533,15 @@ def _generate_parser_action_states(
 
                 node_state.append((curr_node_id, curr_node_id, new_state))
                 action_state.append(
-                    (RESOLVE, (num_pop, num_pop - root_stack_position - 1,
-                               resolved_node, resolved_edgess)))
+                    (RESOLVE,
+                     (num_pop, num_pop - resolved_node_stack_position - 1,
+                      resolved_node, resolved_edgess)))
 
         # elif curr_node_id not in seen_node_id_set:
         #     action_state.append((PENDING, None))
-        logger.debug(pprint.pformat((curr_node_id, curr_node_id, node_state)))
+        logger.debug(
+            pprint.pformat(('node_state after action', curr_node_id,
+                            node_state)))
         logger.debug(action_state)
 
         visited_node_id_set.add(curr_node_id)
@@ -596,20 +602,29 @@ def _generate_parser_action_states(
                     token = parse_token_stack.pop()
                 else:
                     return [], []
-                token_stack.append((curr_node_id, curr_node_label,
+                token_stack.append((curr_node_id, False, curr_node_label,
                                     token.get('label')))
             elif action_type == RESOLVE:
-                (num_pop, root_position, resolved_node,
+                (num_pop, resolved_node_position, resolved_node,
                  resolved_edges) = params
-                new_token_group = []
+                resolved_node_childs = []
                 while num_pop > 0 and token_stack:
                     if token_stack:
-                        new_token_group.append(token_stack.pop())
+                        resolved_node_childs.append(token_stack.pop())
                     else:
                         return [], []
                     num_pop -= 1
-                new_token_group.reverse()
-                token_stack.append((curr_node_id, new_token_group))
+                resolved_node_childs.reverse()
+
+                resolved_node_id = resolved_node.get('id')
+                if framework == 'ucca':
+                    resolved_node_label = resolved_node.get('propagate_label')
+                else:
+                    resolved_node_label = resolved_node.get('label')
+                # token_stack.append((curr_node_id, True, resolved_node_childs))
+                token_stack.append((resolved_node_id, True,
+                                    resolved_node_label, resolved_node_childs))
+
             elif action_type == IGNORE:
                 if parse_token_stack:
                     token = parse_token_stack.pop()
@@ -642,38 +657,53 @@ def _simulate_actions(framework, actions, tokenized_parse_nodes):
     parse_token_stack = copy.deepcopy(tokenized_parse_nodes)
     parse_token_stack.reverse()
     token_stack = []
-    curr_node_id = -1
+    curr_node_id = 0
     abstract_node_id = len(parse_token_stack)
 
     # Simulate actions
     for action in actions:
         logger.debug(('curr_node_id', curr_node_id))
         action_type, params = action
+
+        curr_node_ids.append(curr_node_id)
         if action_type == APPEND:
-            curr_node_id += 1
             token = parse_token_stack.pop()
-            token_stack.append((curr_node_id, token.get('label')))
+            # (node_id, is_resolved, label, [])
+            token_stack.append((curr_node_id, False, token.get('label'), []))
+            curr_node_id += 1
+
         elif action_type == RESOLVE:
-            (num_pop, root_position, resolved_node, resolved_edges) = params
+            (num_pop, resolved_node_position, resolved_node,
+             resolved_edges) = params
             num_childs = num_pop
-            new_token_group = []
+            resolved_node_childs = []
             while num_pop > 0 and token_stack:
-                new_token_group.append(token_stack.pop())
+                resolved_node_childs.append(token_stack.pop())
                 num_pop -= 1
-            new_token_group.reverse()
+            resolved_node_childs.reverse()
+
             if framework == 'ucca':
                 if num_childs == 1:
-                    root_node_id = curr_node_id
+                    resolved_node_id = resolved_node_childs[
+                        resolved_node_position][0]
                 else:
-                    root_node_id = abstract_node_id
+                    resolved_node_id = abstract_node_id
                     abstract_node_id += 1
+                resolved_node_label = resolved_node.get(
+                    'propagate_label', UCCA_UNKNOWN_LABEL)
             else:
-                root_node_id = new_token_group[root_position][0]
-            token_stack.append((root_node_id, new_token_group))
+                resolved_node_id = resolved_node_childs[
+                    resolved_node_position][0]
+                resolved_node_label = resolved_node.get('label')
+
+            # (node_id, is_resolved, label, [children])
+            token_stack.append((resolved_node_id, True, resolved_node_label,
+                                resolved_node_childs))
+
         elif action_type == IGNORE:
-            curr_node_id += 1
             token = parse_token_stack.pop()
+            curr_node_id += 1
+
         token_states.append(copy.deepcopy(token_stack))
-        curr_node_ids.append(curr_node_id)
 
     return token_states, curr_node_ids

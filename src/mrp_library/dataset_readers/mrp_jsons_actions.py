@@ -1,11 +1,13 @@
 import json
 import logging
 import random
+from collections import deque
 from typing import Dict
 
 from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers.dataset_reader import DatasetReader
-from allennlp.data.fields import IndexField, LabelField, TextField
+from allennlp.data.fields import (IndexField, LabelField, MetadataField,
+                                  TextField)
 from allennlp.data.instance import Instance
 from allennlp.data.token_indexers import SingleIdTokenIndexer, TokenIndexer
 from allennlp.data.tokenizers import Token, Tokenizer, WordTokenizer
@@ -13,14 +15,19 @@ from allennlp.models import Model
 from overrides import overrides
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+logger.setLevel(logging.INFO)
+# logger.setLevel(logging.DEBUG)
+
+UNKNOWN_WORD = '<UNKOWN-WORD>'
+START_PADDING_WORD = '<START-WORD>'
+END_PADDING_WORD = '<END-WORD>'
 
 UNKNOWN_POS = '<UNKOWN-POS>'
 START_PADDING_POS = '<START-POS>'
 END_PADDING_POS = '<END-POS>'
 
-UNKNOWN_LABEL = '<UNKOWN-LABEL>'
-START_PADDING_LABEL = '<START-LABEL>'
-END_PADDING_LABEL = '<END-LABEL>'
+EMPTY_TOKEN_STACK = '<EMPTY-TOKEN-STACK>'
+INITIAL_ACTION = '<INITIAL-ACTION>'
 
 # Actions
 ERROR = -1
@@ -35,21 +42,69 @@ class MRPDatasetActionReader(DatasetReader):
             self,
             lazy: bool = False,
             #             tokenizer: Tokenizer = None,
-            word_indexers: Dict[str, TokenIndexer] = None,
-            pos_indexers: Dict[str, TokenIndexer] = None,
+            field_type2indexers: Dict[str, Dict[str, TokenIndexer]] = None,
+            framework_indexers: Dict[str, Dict[str, Dict[
+                str, TokenIndexer]]] = None,
+            frameworks=['ucca', 'psd', 'eds', 'dm', 'amr'],
             prev_parse_feature_window_size: int = 5,
             next_parse_feature_window_size: int = 5,
+            prev_action_window_size: int = 5,
     ) -> None:
         super().__init__(lazy)
         #         self._tokenizer = tokenizer or WordTokenizer()
-        self._word_indexers = word_indexers or {
-            "word": SingleIdTokenIndexer(namespace='word'),
+        self.field_types = [
+            'word', 'pos', 'resolved', 'token_node_label',
+            'token_node_prev_action'
+        ]
+        self.field_type2indexers = field_type2indexers or {
+            field_type: {
+                field_type: SingleIdTokenIndexer(namespace=field_type)
+            }
+            for field_type in self.field_types
         }
-        self._pos_indexers = pos_indexers or {
-            'pos': SingleIdTokenIndexer(namespace='pos'),
-        }
+        assert all(field_type in self.field_type2indexers
+                   for field_type in self.field_types)
+
+        self.frameworks = frameworks or ['ucca', 'psd', 'eds', 'dm', 'amr']
+        if framework_indexers is not None:
+            self._framework_indexers = framework_indexers
+        else:
+            self._framework_indexers = {}
+            for framework in self.frameworks:
+                framework_indexer = {}
+                framework_indexer['token_node_label'] = {
+                    'token_node_label':
+                    SingleIdTokenIndexer(
+                        namespace='{}_token_node_label'.format(framework))
+                }
+                self._framework_indexers[framework] = framework_indexer
+        # logger.debug(('framework_indexers', self._framework_indexers))
+
         self.prev_parse_feature_window_size = prev_parse_feature_window_size
         self.next_parse_feature_window_size = next_parse_feature_window_size
+        self.prev_action_window_size = prev_action_window_size
+        self.parse_node_field_name2field_type = {
+            'label': 'word',
+            'lemma': 'word',
+            'upos': 'pos',
+            'xpos': 'pos',
+        }
+        self.token_node_field_name2field_type = {
+            'label': 'token_node_label',
+            'resolved': 'resolved',
+            'prev_action': 'token_node_prev_action',
+        }
+
+        self.field_type2PADDINGS = {
+            'word': (START_PADDING_WORD, END_PADDING_WORD),
+            'pos': (START_PADDING_POS, END_PADDING_POS),
+        }
+        self.action_type2action_type_name = {
+            -1: 'ERROR',
+            0: 'APPEND',
+            1: 'RESOLVE',
+            2: 'IGNORE',
+        }
 
     @overrides
     def _read(self, file_path):
@@ -76,165 +131,127 @@ class MRPDatasetActionReader(DatasetReader):
         # Generate features
         framework = mrp_json.get('framework', '')
         parse_nodes = parse_json.get('nodes', [])
-        parse_node_labels = []
-        parse_node_lemmas = []
-        parse_node_uposs = []
-        parse_node_xposs = []
 
+        parse_node_field_name2features = {}
+        field_name2features = {}
+
+        # Add start padding
+        for field_name, field_type in self.parse_node_field_name2field_type.items(
+        ):
+            START_PADDING = self.field_type2PADDINGS[field_type][0]
+            parse_node_field_name2features[field_name] = [
+                Token(START_PADDING)
+            ] * self.prev_parse_feature_window_size
+
+        # Add features
         for node in parse_nodes:
-            parse_node_labels.append(Token(node.get('label', UNKNOWN_LABEL)))
-            for prop, value in zip(
-                    node.get('properties', []), node.get('values', [])):
-                if prop == 'lemma':
-                    parse_node_lemmas.append(Token(value))
-                if prop == 'upos':
-                    parse_node_uposs.append(Token(value))
-                if prop == 'xpos':
-                    parse_node_xposs.append(Token(value))
+            tokenized_label = Token(node.get('label', UNKNOWN_WORD))
+            parse_node_field_name2features['label'].append(tokenized_label)
+
+            properties = node.get('properties', [])
+            values = node.get('values', [])
+            for prop, value in zip(properties, values):
+                parse_node_field_name2features[prop].append(Token(value))
+
+        # Add end padding
+        for field_name, field_type in self.parse_node_field_name2field_type.items(
+        ):
+            END_PADDING = self.field_type2PADDINGS[field_type][-1]
+            parse_node_field_name2features[field_name].extend(
+                [Token(END_PADDING)] * self.next_parse_feature_window_size)
 
         if mrp_meta_data:
             *_, curr_node_ids, token_states, actions = mrp_meta_data
         else:
             return
 
-        for curr_node_id, action, token_state in zip(curr_node_ids, actions,
-                                                     [[]] + token_states):
-            # Current node information
-            curr_parse_node_label = parse_node_labels[curr_node_id]
-            curr_parse_node_lemma = parse_node_lemmas[curr_node_id]
-            curr_parse_node_upos = parse_node_uposs[curr_node_id]
-            curr_parse_node_xpos = parse_node_xposs[curr_node_id]
-
-            # Previous node information
-            prev_low_bound = max(
-                curr_node_id - self.prev_parse_feature_window_size, 0)
-            prev_padding = max(
-                self.prev_parse_feature_window_size - curr_node_id, 0)
-            prev_parse_node_labels = [
-                Token(START_PADDING_LABEL)
-            ] * prev_padding + parse_node_labels[prev_low_bound:curr_node_id]
-            prev_parse_node_lemmas = [
-                Token(START_PADDING_LABEL)
-            ] * prev_padding + parse_node_lemmas[prev_low_bound:curr_node_id]
-            prev_parse_node_uposs = [
-                Token(START_PADDING_POS)
-            ] * prev_padding + parse_node_uposs[prev_low_bound:curr_node_id]
-            prev_parse_node_xposs = [
-                Token(START_PADDING_POS)
-            ] * prev_padding + parse_node_xposs[prev_low_bound:curr_node_id]
-
-            # Next node information
-            next_low_bound = max(
-                curr_node_id - self.next_parse_feature_window_size, 0)
-            next_padding = max(
-                self.next_parse_feature_window_size - curr_node_id, 0)
-            next_parse_node_labels = parse_node_labels[next_low_bound:
-                                                       curr_node_id] + [
-                                                           Token(
-                                                               END_PADDING_LABEL
-                                                           )
-                                                       ] * next_padding
-            next_parse_node_lemmas = parse_node_lemmas[next_low_bound:
-                                                       curr_node_id] + [
-                                                           Token(
-                                                               END_PADDING_LABEL
-                                                           )
-                                                       ] * next_padding
-            next_parse_node_uposs = parse_node_uposs[next_low_bound:
-                                                     curr_node_id] + [
-                                                         Token(END_PADDING_POS)
-                                                     ] * next_padding
-            next_parse_node_xposs = parse_node_xposs[next_low_bound:
-                                                     curr_node_id] + [
-                                                         Token(END_PADDING_POS)
-                                                     ] * next_padding
-
+        action_type_name_deque = deque([Token(INITIAL_ACTION)])
+        for action_id, (curr_node_id, action, token_state) in enumerate(
+                zip(curr_node_ids, actions, [[]] + token_states)):
             # Action information
-            action_type, params = action
-            action_type = str(action_type)
+            action_type, action_params = action
+            action_type_name = self.action_type2action_type_name[action_type]
 
-            if action_type == RESOLVE:
-                (num_pop, root_position, resolved_node,
-                 resolved_edges) = params
-                yield self.text_to_instance(
-                    curr_parse_node_label,
-                    curr_parse_node_lemma,
-                    curr_parse_node_upos,
-                    curr_parse_node_xpos,
-                    prev_parse_node_labels,
-                    prev_parse_node_lemmas,
-                    prev_parse_node_uposs,
-                    prev_parse_node_xposs,
-                    next_parse_node_labels,
-                    next_parse_node_lemmas,
-                    next_parse_node_uposs,
-                    next_parse_node_xposs,
-                    action_type,
-                    num_pop=num_pop,
-                    root_position=root_position,
-                )
-            else:
-                yield self.text_to_instance(
-                    curr_parse_node_label,
-                    curr_parse_node_lemma,
-                    curr_parse_node_upos,
-                    curr_parse_node_xpos,
-                    prev_parse_node_labels,
-                    prev_parse_node_lemmas,
-                    prev_parse_node_uposs,
-                    prev_parse_node_xposs,
-                    next_parse_node_labels,
-                    next_parse_node_lemmas,
-                    next_parse_node_uposs,
-                    next_parse_node_xposs,
-                    action_type,
-                )
+            token_node_field_name2features = {
+                'resolved': [
+                    Token('RESOLVED') if token_node[1] else Token('UNRESOLVED')
+                    for token_node in token_state
+                ] or [Token(EMPTY_TOKEN_STACK)],
+                'label': [Token(token_node[2]) for token_node in token_state]
+                or [Token(EMPTY_TOKEN_STACK)],
+                'prev_action':
+                list(action_type_name_deque),
+            }
+            logger.debug(('token_node_field_name2features',
+                          token_node_field_name2features))
+            logger.debug(('action', action_type))
+
+            action_type_name_deque.append(Token(action_type_name))
+            if len(action_type_name_deque) > self.prev_action_window_size:
+                action_type_name_deque.popleft()
+
+            yield self.text_to_instance(
+                framework,
+                parse_node_field_name2features,
+                token_node_field_name2features,
+                curr_node_id,
+                action_type_name,
+                action_params,
+                token_state,
+            )
 
     @overrides
     def text_to_instance(
             self,
-            curr_parse_node_label,
-            curr_parse_node_lemma,
-            curr_parse_node_upos,
-            curr_parse_node_xpos,
-            prev_parse_node_labels,
-            prev_parse_node_lemmas,
-            prev_parse_node_uposs,
-            prev_parse_node_xposs,
-            next_parse_node_labels,
-            next_parse_node_lemmas,
-            next_parse_node_uposs,
-            next_parse_node_xposs,
-            action_type,
-            num_pop=None,
-            root_position=None,
+            framework,
+            parse_node_field_name2features,
+            token_node_field_name2features,
+            curr_node_id,
+            action_type_name,
+            action_params,
+            token_state,
     ) -> Instance:  # type: ignore
 
-        parse_features = [
-            ('curr_parse_node_label', [curr_parse_node_label], 'word'),
-            ('curr_parse_node_lemma', [curr_parse_node_lemma], 'word'),
-            ('curr_parse_node_upos', [curr_parse_node_upos], 'pos'),
-            ('curr_parse_node_xpos', [curr_parse_node_xpos], 'pos'),
-            ('prev_parse_node_labels', prev_parse_node_labels, 'word'),
-            ('prev_parse_node_lemmas', prev_parse_node_lemmas, 'word'),
-            ('prev_parse_node_uposs', prev_parse_node_uposs, 'pos'),
-            ('prev_parse_node_xposs', prev_parse_node_xposs, 'pos'),
-            ('next_parse_node_labels', next_parse_node_labels, 'word'),
-            ('next_parse_node_lemmas', next_parse_node_lemmas, 'word'),
-            ('next_parse_node_uposs', next_parse_node_uposs, 'pos'),
-            ('next_parse_node_xposs', next_parse_node_xposs, 'pos'),
-        ]
+        field_name2field = {'framework': MetadataField(framework)}
+        for parse_node_field_name, features in parse_node_field_name2features.items(
+        ):
+            full_name = 'parse_node_{}s'.format(parse_node_field_name)
+            field_type = self.parse_node_field_name2field_type[
+                parse_node_field_name]
+            if field_type in self.field_type2indexers:
+                text_field = TextField(features,
+                                       self.field_type2indexers[field_type])
+            else:
+                raise NotImplementedError
+            field_name2field[full_name] = text_field
 
-        instance_fields = {}
-        for field_name, field, field_type in parse_features:
-            # logger.debug(('field', field_name))
-            if field_type == 'word':
-                instance_fields[field_name] = TextField(
-                    field, self._word_indexers)
-            elif field_type == 'pos':
-                instance_fields[field_name] = TextField(
-                    field, self._pos_indexers)
+        if action_type_name:
+            field_name2field['action_type'] = LabelField(action_type_name)
 
-        if action_type:
-            instance_fields['action_type'] = LabelField(action_type)
-        return Instance(instance_fields)
+        field_name2field['curr_node_id'] = MetadataField(curr_node_id)
+        field_name2field['action_params'] = MetadataField(action_params)
+        field_name2field['token_state'] = MetadataField(token_state)
+
+        for token_node_field_name, features in token_node_field_name2features.items(
+        ):
+            full_name = 'token_node_{}s'.format(token_node_field_name)
+            field_type = self.token_node_field_name2field_type[
+                token_node_field_name]
+            if field_type in self.field_type2indexers:
+                text_field = TextField(features,
+                                       self.field_type2indexers[field_type])
+            else:
+                raise NotImplementedError
+            field_name2field[full_name] = text_field
+
+        # field_name2field['framework_token_node_labels'] = TextField(
+        #     token_node_labels,
+        #     self._framework_indexers[framework]['token_node_label'])
+
+        token_node_ids = [token_node[0] for token_node in token_state]
+        token_node_childs = [token_node[3] for token_node in token_state]
+        field_name2field['token_node_ids'] = MetadataField(token_node_ids)
+        field_name2field['token_node_childs'] = MetadataField(
+            token_node_childs)
+
+        return Instance(field_name2field)
