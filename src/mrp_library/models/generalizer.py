@@ -73,6 +73,7 @@ class ActionGeneralizer(Model):
             token_node_ids,
             token_node_childs,
     ) -> Dict[str, torch.Tensor]:
+        assert all(fr == framework[0] for fr in framework)
 
         logger.debug(('curr_node_id', curr_node_id[0]))
         logger.debug(('action_types', action_type[0]))
