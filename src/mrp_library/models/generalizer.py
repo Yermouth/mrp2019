@@ -17,8 +17,9 @@ from allennlp.training.metrics import CategoricalAccuracy
 from overrides import overrides
 
 logger = logging.getLogger(__name__)
-#logger.setLevel(logging.INFO)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
+
+#logger.setLevel(logging.DEBUG)
 
 
 # @Model.register("generalizer")
@@ -30,11 +31,12 @@ class ActionGeneralizer(Model):
             field_type2embedder: Dict[str, TextFieldEmbedder],
             field_type2seq2vec_encoder: Dict[str, Seq2VecEncoder],
             field_type2seq2seq_encoder: Dict[str, Seq2SeqEncoder],
-            classifier_feedforward: FeedForward,
+            action_classifier_feedforward: FeedForward,
+            action_num_pop_classifier_feedforward: FeedForward,
             initializer: InitializerApplicator = InitializerApplicator(),
             regularizer: Optional[RegularizerApplicator] = None,
-            framework2field_type2embedder: Dict[str, Dict[
-                str, TextFieldEmbedder]] = None,
+            framework2field_type2embedder: Dict[
+                str, Dict[str, TextFieldEmbedder]] = None,
     ) -> None:
         super(ActionGeneralizer, self).__init__(vocab, regularizer)
         self.cuda_device = cuda_device
@@ -60,16 +62,24 @@ class ActionGeneralizer(Model):
             framework2field_type2embedder)
         self.field_type2seq2vec_encoder = torch.nn.ModuleDict(
             field_type2seq2vec_encoder)
-        self.classifier_feedforward = classifier_feedforward
-        self.action_type_loss = torch.nn.CrossEntropyLoss()
-        self.metrics = {
-            "accuracy": CategoricalAccuracy(),
+        self.field_type2seq2seq_encoder = torch.nn.ModuleDict(
+            field_type2seq2seq_encoder)
+
+        self.action_classifier_feedforward = action_classifier_feedforward
+        self.action_num_pop_classifier_feedforward = action_num_pop_classifier_feedforward
+        self.action_type_loss = torch.nn.CrossEntropyLoss(ignore_index=-1)
+        self.action_num_pop_loss = torch.nn.CrossEntropyLoss()
+        self.action_type_metrics = {
+            "action_type_accuracy": CategoricalAccuracy(),
+        }
+        self.action_num_pop_metrics = {
+            "action_num_pop_accuracy": CategoricalAccuracy(),
         }
         initializer(self)
 
     @overrides
     def forward(self, instance_type, framework, *args, **kwargs):
-        if instance_type[0] == 'action':
+        if instance_type[0] == 'action' or instance_type[0] == 'resolve':
             return self._forward_action(instance_type, framework, *args,
                                         **kwargs)
         elif instance_type[0] == 'resolve':
@@ -81,9 +91,11 @@ class ActionGeneralizer(Model):
     def _forward_resolve_framework(self, instance_type, framework, *args,
                                    **kwargs):
         if framework[0] == 'dm':
-            return self._forward_resolve_dm(*args, **kwargs)
+            return self._forward_resolve_dm(instance_type, framework, *args,
+                                            **kwargs)
         elif framework[0] == 'ucca':
-            return self._forward_resolve_ucca(*args, **kwargs)
+            return self._forward_resolve_ucca(instance_type, framework, *args,
+                                              **kwargs)
         else:
             raise NotImplementedError
 
@@ -99,12 +111,17 @@ class ActionGeneralizer(Model):
             action_type: torch.LongTensor,
             action_type_name,
             action_params,
+            action_num_pop,
+            action_num_pop_mask,
+            stack_len,
             token_state,
             token_node_resolveds: Dict[str, torch.LongTensor],
             token_node_labels: Dict[str, torch.LongTensor],
             token_node_prev_actions: Dict[str, torch.LongTensor],
             token_node_ids,
             token_node_childs,
+            *args,
+            **kwargs,
     ) -> Dict[str, torch.Tensor]:
         assert all(fr == framework[0] for fr in framework)
         # assert all(name == action_type_name[0] for name in action_type_name)
@@ -119,6 +136,7 @@ class ActionGeneralizer(Model):
         logger.debug(('token_node_labels', token_node_labels))
         logger.debug(('token_node_prev_actions', token_node_prev_actions))
 
+        # seq2vec features
         seq2vec_fields = [
             # (parse_node_labels, 'word'),
             # (parse_node_lemmas, 'word'),
@@ -129,44 +147,101 @@ class ActionGeneralizer(Model):
             (token_node_prev_actions, 'token_node_prev_action'),
         ]
 
-        embedded_fields = []
+        embedded_seq2vec_fields = []
         for field, field_type in seq2vec_fields:
-            embedded_fields.append(self.field_type2embedder[field_type](field))
+            embedded_seq2vec_fields.append(
+                self.field_type2embedder[field_type](field))
 
-        logger.debug(('embedded_fields', embedded_fields[0].shape))
+        logger.debug(
+            ('embedded_seq2vec_fields', embedded_seq2vec_fields[0].shape))
 
-        encoded_fields = []
+        encoded_seq2vec_fields = []
         for seq2vec_field, embedded_field in zip(seq2vec_fields,
-                                                 embedded_fields):
+                                                 embedded_seq2vec_fields):
             field, field_type = seq2vec_field
             field_mask = util.get_text_field_mask(field)
             logger.debug(('field_mask', field_mask.shape))
             encoded_field = self.field_type2seq2vec_encoder[field_type](
                 embedded_field, field_mask)
-            encoded_fields.append(encoded_field)
+            encoded_seq2vec_fields.append(encoded_field)
 
-        action_logits = self.classifier_feedforward(
-            torch.cat(encoded_fields, dim=-1))
-        action_probs, action_preds = action_logits.max(1)
-        action_resolve_preds = action_preds.eq_(self.resolve_tensor)
+        # seq2seq features
+        seq2seq_fields = [
+            (token_node_resolveds, 'resolved'),
+            (token_node_labels, 'token_node_label'),
+        ]
+
+        embedded_seq2seq_fields = []
+        for field, field_type in seq2seq_fields:
+            embedded_seq2seq_fields.append(
+                self.field_type2embedder[field_type](field))
+
+        logger.debug(
+            ('embedded_seq2seq_fields', embedded_seq2seq_fields[0].shape))
+
+        encoded_seq2seq_fields = []
+        for seq2seq_field, embedded_field in zip(seq2seq_fields,
+                                                 embedded_seq2seq_fields):
+            field, field_type = seq2seq_field
+            field_mask = util.get_text_field_mask(field)
+            logger.debug(('field_mask', field_mask.shape))
+            encoded_field = self.field_type2seq2seq_encoder[field_type](
+                embedded_field, field_mask)
+            logger.debug(('seq2seq encoded_field', encoded_field.shape))
+            encoded_seq2seq_fields.append(encoded_field)
+
+        encoded_seq2vec_features = torch.cat(encoded_seq2vec_fields, dim=-1)
+        encoded_seq2seq_features = torch.cat(encoded_seq2seq_fields, dim=-1)
+
+        # Predict action type
+        action_type_logits = self.action_classifier_feedforward(
+            encoded_seq2vec_features)
+        action_probs, action_preds = action_type_logits.max(1)
+        action_resolve_preds = action_preds.eq(self.resolve_tensor)
+
+        if stack_len[0] >= 2:
+            logger.debug(('token_node_resolveds', token_node_resolveds))
+            # Predict root position
+            action_num_pop = action_num_pop.squeeze(-1)
+            action_num_pop_logits = self.action_num_pop_classifier_feedforward(
+                encoded_seq2seq_features).squeeze(-1)
+            action_num_pop_mask = action_num_pop_mask.float().expand_as(
+                action_num_pop_logits)
+            # action_num_pop_mask = action_num_pop.gt(-1).float().unsqueeze(-1).expand_as(action_num_pop_logits)
+            masked_action_num_pop_logits = action_num_pop_logits * action_num_pop_mask
+
+            logger.debug(('masked_action_num_pop_logits',
+                          masked_action_num_pop_logits.shape))
 
         output_dict = {
             'instance_type': instance_type[0],
             'framework': framework[0],
-            'action_logits': action_logits,
+            'action_type_logits': action_type_logits,
             'action_probs': action_probs,
             'action_preds': action_preds,
         }
         logger.debug(('output_dict', output_dict))
 
         if action_type is not None:
-            logger.debug(('action_logits', action_logits))
-            logger.debug(('label', action_type))
-            action_type_loss = self.action_type_loss(action_logits,
+            logger.debug(('action_type_logits', action_type_logits))
+            logger.debug(('action_type', action_type))
+            action_type_loss = self.action_type_loss(action_type_logits,
                                                      action_type)
-            for metric in self.metrics.values():
-                metric(action_logits, action_type)
+            for metric in self.action_type_metrics.values():
+                metric(action_type_logits, action_type)
             output_dict['loss'] = action_type_loss
+
+        if action_num_pop is not None and stack_len[0] >= 2:
+            logger.debug(('action_num_pop_logits', action_num_pop_logits))
+            logger.debug(
+                ('masked_action_num_pop_logits', masked_action_num_pop_logits))
+            logger.debug(('action_num_pop', action_num_pop))
+
+            action_num_pop_loss = self.action_num_pop_loss(
+                masked_action_num_pop_logits, action_num_pop)
+            for metric in self.action_num_pop_metrics.values():
+                metric(masked_action_num_pop_logits, action_num_pop)
+            output_dict['loss'] += action_num_pop_loss
 
         # raise NotImplementedError
         return output_dict
@@ -190,8 +265,7 @@ class ActionGeneralizer(Model):
             token_node_ids,
             token_node_childs,
     ):
-
-        output_dict = {}
+        output_dict = {'loss': None}
         return output_dict
 
     def _forward_resolve_ucca(
@@ -213,7 +287,7 @@ class ActionGeneralizer(Model):
             token_node_ids,
             token_node_childs,
     ):
-        output_dict = {}
+        output_dict = {'loss': None}
         return output_dict
 
     @overrides
@@ -239,7 +313,8 @@ class ActionGeneralizer(Model):
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         return {
             metric_name: metric.get_metric(reset)
-            for metric_name, metric in self.metrics.items()
+            for metric_name, metric in list(self.action_type_metrics.items()) +
+            list(self.action_num_pop_metrics.items())
         }
 
 

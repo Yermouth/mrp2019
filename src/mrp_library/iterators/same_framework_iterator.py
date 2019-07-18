@@ -23,7 +23,7 @@ def split_by_representation_framework(instance_list):
     return iter(insts_by_framework.values())
 
 #@DataIterator.register("same_framework")
-class SameRepresentationIterator(BucketIterator):
+class SameFrameworkIterator(BucketIterator):
     """
     Splits batches into batches containing the same framework.
     The framework of each instance is determined by looking at the 'framework' value
