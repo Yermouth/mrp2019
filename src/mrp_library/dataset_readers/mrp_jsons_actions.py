@@ -190,29 +190,61 @@ class MRPDatasetActionReader(DatasetReader):
             if len(action_type_name_deque) > self.prev_action_window_size:
                 action_type_name_deque.popleft()
 
+            action_num_pop = 1
+            action_num_pop_mask = 0
+            if action_type_name == 'RESOLVE':
+                instance_type = 'resolve'
+                (action_num_pop, resolved_node_position, resolved_node,
+                 resolved_edges) = action_params
+                action_num_pop_mask = 1
+                yield self.text_to_instance(
+                    instance_type,
+                    framework,
+                    parse_node_field_name2features,
+                    token_node_field_name2features,
+                    curr_node_id,
+                    action_type_name,
+                    action_params,
+                    action_num_pop - 1,
+                    action_num_pop_mask,
+                    token_state,
+                )
+
+            instance_type = 'action'
             yield self.text_to_instance(
+                instance_type,
                 framework,
                 parse_node_field_name2features,
                 token_node_field_name2features,
                 curr_node_id,
                 action_type_name,
                 action_params,
+                action_num_pop - 1,
+                action_num_pop_mask,
                 token_state,
             )
 
     @overrides
     def text_to_instance(
             self,
+            instance_type,
             framework,
             parse_node_field_name2features,
             token_node_field_name2features,
             curr_node_id,
             action_type_name,
             action_params,
+            action_num_pop,
+            action_num_pop_mask,
             token_state,
     ) -> Instance:  # type: ignore
 
-        field_name2field = {'framework': MetadataField(framework)}
+        field_name2field = {
+            'instance_type': MetadataField(instance_type),
+            'framework': MetadataField(framework),
+        }
+
+        # Parse node fields
         for parse_node_field_name, features in parse_node_field_name2features.items(
         ):
             full_name = 'parse_node_{}s'.format(parse_node_field_name)
@@ -225,13 +257,7 @@ class MRPDatasetActionReader(DatasetReader):
                 raise NotImplementedError
             field_name2field[full_name] = text_field
 
-        if action_type_name:
-            field_name2field['action_type'] = LabelField(action_type_name)
-
-        field_name2field['curr_node_id'] = MetadataField(curr_node_id)
-        field_name2field['action_params'] = MetadataField(action_params)
-        field_name2field['token_state'] = MetadataField(token_state)
-
+        # Token node fields
         for token_node_field_name, features in token_node_field_name2features.items(
         ):
             full_name = 'token_node_{}s'.format(token_node_field_name)
@@ -247,6 +273,23 @@ class MRPDatasetActionReader(DatasetReader):
         # field_name2field['framework_token_node_labels'] = TextField(
         #     token_node_labels,
         #     self._framework_indexers[framework]['token_node_label'])
+
+        # Action label fields
+        if 'token_node_resolveds' in field_name2field:
+            field_name2field['action_num_pop'] = IndexField(
+                action_num_pop, field_name2field['token_node_resolveds'])
+            field_name2field['action_num_pop_mask'] = IndexField(
+                action_num_pop_mask, field_name2field['token_node_resolveds'])
+
+        if action_type_name:
+            field_name2field['action_type'] = LabelField(action_type_name)
+
+        # Metadata fields
+        field_name2field['curr_node_id'] = MetadataField(curr_node_id)
+        field_name2field['action_params'] = MetadataField(action_params)
+        field_name2field['action_type_name'] = MetadataField(action_type_name)
+        field_name2field['token_state'] = MetadataField(token_state)
+        field_name2field['stack_len'] = MetadataField(len(token_state))
 
         token_node_ids = [token_node[0] for token_node in token_state]
         token_node_childs = [token_node[3] for token_node in token_state]
