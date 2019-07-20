@@ -1,1 +1,1 @@
-from mrp_library.models.generalizer import ActionGeneralizer, Generalizer
+from mrp_library.models.resolver import Resolver
