@@ -8,7 +8,6 @@ mtool/
 # Keep test fixtures data
 !src/tests/fixtures/*
 
-
 # ipython notebook cache
 .ipynb_checkpoints/
 
@@ -18,3 +17,5 @@ mtool/
 # python cache
 **/__pycache__/
 
+# Ignore program output
+output/*

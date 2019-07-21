@@ -130,6 +130,9 @@ def mrp_json2parser_states(
         alignment,
     )
 
+    if not token_nodes:
+        return [], {}
+
     if tokenized_parse_nodes:
         token_pos = 0
         parse_nodes_anchors = []
@@ -350,6 +353,10 @@ def _resolve_dependencys(nodes,
             else:
                 abstract_node_id_set.add(node_id)
 
+        if not all(
+                len(node_id2token_poss.get(node.get('id', -1), [])) >= 1
+                for node in token_nodes):
+            return [], ()
         assert all(
             len(node_id2token_poss.get(node.get('id', -1), [])) >= 1
             for node in token_nodes)

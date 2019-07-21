@@ -31,7 +31,7 @@ def split_by_instance_type_by_framework_by_stack_len(instance_list):
         insts for framework2stack_len2insts in
         instance_type2framework2stack_len2insts.values()
         for stack_len2insts in framework2stack_len2insts.values()
-        for insts in stack_len2insts.values()
+        for insts in stack_len2insts.values() if insts
     ]
     random.shuffle(instance_list)
     return iter(instance_list)
