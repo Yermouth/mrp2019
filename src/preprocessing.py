@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import string
 
@@ -7,13 +8,16 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+CID_MISMATCH_PREFIXS = ['reviews-']
+ALLOWED_FRAMEWORKS = ['ucca', 'psd', 'eds', 'dm', 'amr']
 
-def read_mrp_json_file(dataset_filename):
+
+def read_mrp_json_file(dataset_filename, cid2mrp_json={}):
     """Read mrp formatted json file"""
-    mrp_jsons = []
     with open(dataset_filename) as rf:
         for line in rf:
             mrp_json = json.loads(line.strip())
+            cid = mrp_json.get('id')
             framework = mrp_json.get('framework', '')
             is_ucca = framework == 'ucca'
 
@@ -29,13 +33,17 @@ def read_mrp_json_file(dataset_filename):
                         text_segments.append(input_text[anchor.get('from', -1):
                                                         anchor.get('to', -1)])
                     mrp_json['nodes'][i]['label'] = ''.join(text_segments)
-            mrp_jsons.append(mrp_json)
-    return mrp_jsons
+
+            for prefix in CID_MISMATCH_PREFIXS:
+                if cid.startswith(prefix):
+                    cid = cid[len(prefix):]
+            cid2mrp_json[cid] = mrp_json
+    return cid2mrp_json
 
 
 class MrpDataset(object):
     def __init__(self):
-        self.framework2dataset2mrp_jsons = {}
+        self.framework2cid2mrp_json = {}
         self.frameworks = []
 
     def load_mrp_json_dir(self, dir_name, file_extension):
@@ -43,13 +51,14 @@ class MrpDataset(object):
         frameworks = [
             sub_dir for sub_dir in os.listdir(dir_name)
             if os.path.isdir(os.path.join(dir_name, sub_dir))
+            and sub_dir in ALLOWED_FRAMEWORKS
         ]
 
-        framework2dataset2mrp_jsons = {}
+        framework2cid2mrp_json = {}
         for framework in tqdm(frameworks, desc='frameworks'):
-            dataset2mrp_jsons = {}
             framework_dir = os.path.join(dir_name, framework)
             dataset_names = os.listdir(framework_dir)
+            cid2mrp_json = {}
 
             for dataset_name in tqdm(dataset_names, desc='dataset_name'):
                 if not dataset_name.endswith(file_extension):
@@ -57,34 +66,36 @@ class MrpDataset(object):
                 dataset_filename = os.path.join(framework_dir, dataset_name)
 
                 # Remove mrp extension of dataset_name
-                dataset_name = dataset_name.split('.')[0]
-                mrp_jsons = read_mrp_json_file(dataset_filename)
-                dataset2mrp_jsons[dataset_name] = mrp_jsons
+                read_mrp_json_file(dataset_filename, cid2mrp_json)
 
-            framework2dataset2mrp_jsons[framework] = dataset2mrp_jsons
+            framework2cid2mrp_json[framework] = cid2mrp_json
         self.frameworks = frameworks
-        self.framework2dataset2mrp_jsons = framework2dataset2mrp_jsons
-        return frameworks, framework2dataset2mrp_jsons
+        self.framework2cid2mrp_json = framework2cid2mrp_json
+        return frameworks, framework2cid2mrp_json
 
     def mrp_json_generator(
             self,
             data_size_limit=None,
             ignore_framework_set={},
-            ignore_dataset_set={},
+            total_split=None,
+            split_no=None,
     ):
-        for framework, dataset2mrp_jsons in self.framework2dataset2mrp_jsons.items(
-        ):
+        for framework, cid2mrp_json in self.framework2cid2mrp_json.items():
             if framework in ignore_framework_set:
                 continue
-            for dataset, mrp_jsons in dataset2mrp_jsons.items():
-                if dataset in ignore_dataset_set:
-                    continue
+            cid_mrp_json_pairs = list(cid2mrp_json.items())
+            if data_size_limit:
+                cid_mrp_json_pairs = cid_mrp_json_pairs[:data_size_limit]
 
-                _mrp_jsons = mrp_jsons
-                if data_size_limit:
-                    _mrp_jsons = mrp_jsons[:data_size_limit]
-                for idx, mrp_json in enumerate(_mrp_jsons):
-                    yield framework, dataset, idx, mrp_json
+            if total_split is not None and split_no is not None:
+                data_size = len(cid_mrp_json_pairs)
+                split_size = math.ceil(data_size / total_split)
+                start = split_no * split_size
+                end = (split_no + 1) * split_size
+                cid_mrp_json_pairs = cid_mrp_json_pairs[start:end]
+
+            for cid, mrp_json in cid_mrp_json_pairs:
+                yield framework, cid, mrp_json
 
 
 def read_companion_parse_file(dataset_filename):

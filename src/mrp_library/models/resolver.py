@@ -18,7 +18,9 @@ from allennlp.training.metrics import CategoricalAccuracy, SequenceAccuracy
 from overrides import overrides
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)
+logger.setLevel(logging.ERROR)
+
+# logger.setLevel(logging.WARNING)
 
 #logger.setLevel(logging.INFO)
 #logger.setLevel(logging.DEBUG)
@@ -33,9 +35,8 @@ class Resolver(Model):
             field_type2embedder: Dict[str, TextFieldEmbedder],
             field_type2seq2vec_encoder: Dict[str, Seq2VecEncoder],
             field_type2seq2seq_encoder: Dict[str, Seq2SeqEncoder],
-            action_classifier_feedforward: FeedForward,
-            action_num_pop_classifier_feedforward: FeedForward,
             framework2field_type2feedforward: Dict[str, FeedForward],
+            framework2metrics,
             initializer: InitializerApplicator = InitializerApplicator(),
             regularizer: Optional[RegularizerApplicator] = None,
             framework2field_type2embedder: Dict[
@@ -44,13 +45,7 @@ class Resolver(Model):
         super(Resolver, self).__init__(vocab, regularizer)
         self.cuda_device = cuda_device
         self.vocab = vocab
-        self.action_type2action_type_name = {
-            -1: 'ERROR',
-            0: 'APPEND',
-            1: 'RESOLVE',
-            2: 'IGNORE',
-        }
-        self.resolve_tensor = torch.tensor(vocab.get_token_index('RESOLVE'))
+        self.resolve_tensor = torch.tensor(vocab.get_token_index('RESOLVE', namespace='action_type_labels'))
         if cuda_device != -1:
             self.resolve_tensor = self.resolve_tensor.cuda(cuda_device)
 
@@ -68,26 +63,12 @@ class Resolver(Model):
         self.field_type2seq2seq_encoder = torch.nn.ModuleDict(
             field_type2seq2seq_encoder)
 
-        self.action_classifier_feedforward = action_classifier_feedforward
-        self.action_num_pop_classifier_feedforward = action_num_pop_classifier_feedforward
         self.framework2field_type2feedforward = framework2field_type2feedforward
         self.action_type_loss = torch.nn.CrossEntropyLoss()
         self.action_num_pop_loss = torch.nn.CrossEntropyLoss()
         self.child_edges_type_loss = torch.nn.CrossEntropyLoss()
         self.root_label_type_loss = torch.nn.CrossEntropyLoss()
-        self.action_type_metrics = {
-            "action_type_accuracy": CategoricalAccuracy(),
-        }
-        self.action_num_pop_metrics = {
-            "action_num_pop_accuracy": CategoricalAccuracy(),
-        }
-        self.child_edges_type_metrics = {
-            "child_edges_type_accuracy": CategoricalAccuracy(),
-        }
-        self.root_label_type_metrics = {
-            "root_label_type_accuracy": CategoricalAccuracy(),
-        }
-
+        self.framework2metrics = framework2metrics
         initializer(self)
 
     @overrides
@@ -147,12 +128,12 @@ class Resolver(Model):
             token_state,
             token_node_ids,
             token_node_childs,
-            action_type: torch.LongTensor=None,
+            action_type: torch.LongTensor = None,
             action_num_pop=None,
             action_num_pop_mask=None,
-            token_node_resolveds: Dict[str, torch.LongTensor]=None,
-            token_node_labels: Dict[str, torch.LongTensor]=None,
-            token_node_prev_actions: Dict[str, torch.LongTensor]=None,
+            token_node_resolveds: Dict[str, torch.LongTensor] = None,
+            token_node_labels: Dict[str, torch.LongTensor] = None,
+            token_node_prev_actions: Dict[str, torch.LongTensor] = None,
             **kwargs,
     ) -> Dict[str, torch.Tensor]:
         assert all(fr == framework[0] for fr in framework)
@@ -275,20 +256,23 @@ class Resolver(Model):
                                          dim=-1)
 
         # Predict action type
-        action_type_logits = self.action_classifier_feedforward(
+        action_classifier_feedforward = self.framework2field_type2feedforward[
+            framework[0]]['action']
+        action_type_logits = action_classifier_feedforward(
             action_type_features)
         action_type_probs, action_type_preds = action_type_logits.max(1)
         action_resolve_preds = action_type_preds.eq(self.resolve_tensor)
 
         output_dict = {
-            'instance_type': instance_type[0],
-            'framework': framework[0],
+            'instance_type': instance_type,
+            'framework': framework,
             'action_type_logits': action_type_logits,
             'action_type_probs': action_type_probs,
             'action_type_preds': action_type_preds,
         }
 
         # Predict action num pop stack length >= 2
+        #logger.error(('stack_len', stack_len[0]))
         if stack_len[0] >= 2:
             logger.debug(('token_node_resolveds', token_node_resolveds))
             # Predict number of pops
@@ -299,7 +283,9 @@ class Resolver(Model):
                                                 dim=-1)
             logger.debug(
                 ('action_num_pop_features', action_num_pop_features.shape))
-            action_num_pop_logits = self.action_num_pop_classifier_feedforward(
+            action_num_pop_classifier_feedforward = self.framework2field_type2feedforward[
+                framework[0]]['action_num_pop']
+            action_num_pop_logits = action_num_pop_classifier_feedforward(
                 action_num_pop_features)
             logger.debug(
                 ('action_num_pop_logits', action_num_pop_logits.shape))
@@ -322,6 +308,7 @@ class Resolver(Model):
                 'masked_action_num_pop_probs'] = masked_action_num_pop_probs
             output_dict[
                 'masked_action_num_pop_preds'] = masked_action_num_pop_preds
+            #logger.error(('masked_action_num_pop_preds', masked_action_num_pop_preds))
 
         logger.debug(('output_dict', output_dict))
 
@@ -338,19 +325,18 @@ class Resolver(Model):
             logger.debug(('action_type', action_type.shape))
             action_type_loss = self.action_type_loss(action_type_logits,
                                                      action_type)
-            for metric in self.action_type_metrics.values():
+            for metric in self.framework2metrics[framework[0]]['action_type'].values():
                 metric(action_type_logits, action_type)
             output_dict['loss'] = action_type_loss
 
         if action_num_pop is not None and stack_len[0] >= 2:
             action_num_pop = action_num_pop.squeeze(-1)
             if not rand_int:
-                logger.debug(
-                    ('action_num_pop_logits', action_num_pop_logits))
+                logger.debug(('action_num_pop_logits', action_num_pop_logits))
                 logger.debug(('masked_action_num_pop_logits',
-                                masked_action_num_pop_logits))
+                              masked_action_num_pop_logits))
                 logger.debug(('masked_action_num_pop_preds',
-                                masked_action_num_pop_preds))
+                              masked_action_num_pop_preds))
                 logger.debug(('action_num_pop', action_num_pop))
             logger.debug(('action_num_pop_logits', action_num_pop_logits))
             logger.debug(
@@ -359,7 +345,7 @@ class Resolver(Model):
 
             action_num_pop_loss = self.action_num_pop_loss(
                 masked_action_num_pop_logits, action_num_pop)
-            for metric in self.action_num_pop_metrics.values():
+            for metric in self.framework2metrics[framework[0]]['action_num_pop'].values():
                 metric(masked_action_num_pop_logits, action_num_pop)
             if 'loss' not in output_dict:
                 output_dict['loss'] = action_num_pop_loss
@@ -375,6 +361,7 @@ class Resolver(Model):
             framework,
             mode,
             stack_len,
+            action_num_pop,
             parse_node_labels: Dict[str, torch.LongTensor],
             parse_node_lemmas: Dict[str, torch.LongTensor],
             parse_node_uposs: Dict[str, torch.LongTensor],
@@ -437,28 +424,28 @@ class Resolver(Model):
             embedded_resolved_root_features).squeeze(1)
 
         # Single node resolve (Predict propagate node)
-        is_single_node_resolve = stack_len[0] == 1
-        logger.warning(('stack_len', stack_len))
+        is_single_node_resolve = action_num_pop[0] == 0
+        #logger.error(('action_num_pop', action_num_pop))
+
+        output_dict = {
+            'instance_type': instance_type,
+            'framework': framework,
+            'resolve_type': 'single_node',
+        }
+        logger.debug(('root_node_label_logits', root_node_label_logits))
+        logger.debug(
+            ('resolved_label_root_label', resolved_label_root_label))
+
+        if mode[0] == 'train':
+            root_label_type_loss = self.root_label_type_loss(
+                root_node_label_logits, resolved_label_root_label)
+            for metric in self.framework2metrics[framework[0]]['root_label_type'].values():
+                metric(root_node_label_logits, resolved_label_root_label)
+            output_dict['loss'] = root_label_type_loss
+
+        output_dict['root_node_label_logits'] = root_node_label_logits
 
         if is_single_node_resolve:
-            output_dict = {
-                'instance_type': instance_type[0],
-                'framework': framework[0],
-                'resolve_type': 'single_node',
-            }
-            logger.debug(
-                ('root_node_label_logits', root_node_label_logits))
-            logger.debug(
-                ('resolved_label_root_label', resolved_label_root_label))
-
-            if mode[0] == 'train':
-                root_label_type_loss = self.root_label_type_loss(
-                    root_node_label_logits, resolved_label_root_label)
-                for metric in self.root_label_type_metrics.values():
-                    metric(root_node_label_logits, resolved_label_root_label)
-                output_dict['loss'] = root_label_type_loss
-
-            output_dict['root_node_label_logits'] = root_node_label_logits
             return output_dict
 
         # seq2seq features
@@ -487,7 +474,8 @@ class Resolver(Model):
                                                  embedded_seq2seq_fields):
             field, field_type = seq2seq_field
             field_mask = util.get_text_field_mask(field)
-            logger.debug(('field_mask', field_mask.shape))
+            logger.warning(('field_mask', field_mask.shape))
+            logger.warning(('embedded_field', embedded_field.shape))
             encoded_field = self.field_type2seq2seq_encoder[field_type](
                 embedded_field, field_mask)
             # print(field_type, field, embedded_field, field_mask)
@@ -496,26 +484,24 @@ class Resolver(Model):
             encoded_seq2seq_fields.append(encoded_field)
 
         encoded_seq2seq_features = torch.cat(encoded_seq2seq_fields, dim=-1)
-        logger.warning(('encoded_seq2seq_features', encoded_seq2seq_features.shape))
+        logger.warning(
+            ('encoded_seq2seq_features', encoded_seq2seq_features.shape))
         logger.warning(('framework[0]', framework[0]))
         child_edges_feedforward = self.framework2field_type2feedforward[
             framework[0]]['child_edges']
 
-        child_edges_type_logits = child_edges_feedforward(
-            encoded_seq2seq_features)
         # child_edges_type_logits = child_edges_feedforward(
-        #     encoded_seq2seq_features).transpose(1, 2)
+        #     encoded_seq2seq_features)
+        child_edges_type_logits = child_edges_feedforward(
+            encoded_seq2seq_features).transpose(1, 2)
         logger.warning(('child_edges_type_logits', child_edges_type_logits))
         child_edges_probs, child_edges_preds = child_edges_type_logits.max(1)
         logger.debug((child_edges_type_logits.shape))
 
-        output_dict = {
-            'instance_type': instance_type[0],
-            'framework': framework[0],
-            'child_edges_type_logits': child_edges_type_logits,
-            'child_edges_probs': child_edges_probs,
-            'child_edges_preds': child_edges_preds,
-        }
+        output_dict['child_edges_type_logits'] = child_edges_type_logits
+        output_dict['child_edges_probs'] = child_edges_probs
+        output_dict['child_edges_preds'] = child_edges_preds
+
         logger.debug(('output_dict', output_dict))
 
         if resolved_label_edge_labels is not None:
@@ -529,7 +515,7 @@ class Resolver(Model):
 
             class_size = self.vocab.get_vocab_size(
                 '{}_resolved_label_edge_labels'.format(framework[0]))
-            for metric in self.child_edges_type_metrics.values():
+            for metric in self.framework2metrics[framework[0]]['child_edge_type'].values():
                 # metric(child_edges_type_logits, resolved_label_edge_labels)
                 logger.info(('child_edges_preds', child_edges_preds.shape))
                 logger.info(
@@ -611,8 +597,8 @@ class Resolver(Model):
 
         if is_single_node_resolve:
             output_dict = {
-                'instance_type': instance_type[0],
-                'framework': framework[0],
+                'instance_type': instance_type,
+                'framework': framework,
                 'resolve_type': 'single_node',
             }
             logger.debug(
@@ -621,7 +607,7 @@ class Resolver(Model):
                 ('resolved_label_root_label', resolved_label_root_label))
             root_label_type_loss = self.root_label_type_loss(
                 propagate_node_label_logits, resolved_label_root_label)
-            for metric in self.root_label_type_metrics.values():
+            for metric in self.framework2metrics[framework[0]]['root_label_type'].values():
                 metric(propagate_node_label_logits, resolved_label_root_label)
             output_dict[
                 'propagate_node_label_logits'] = propagate_node_label_logits
@@ -657,6 +643,7 @@ class Resolver(Model):
             ##  print(resolved_label_edge_labels)
             encoded_seq2seq_fields.append(encoded_field)
 
+
         encoded_seq2seq_features = torch.cat(encoded_seq2seq_fields, dim=-1)
         child_edges_feedforward = self.framework2field_type2feedforward['dm'][
             'child_edges']
@@ -666,8 +653,8 @@ class Resolver(Model):
         logger.debug((child_edges_type_logits.shape))
 
         output_dict = {
-            'instance_type': instance_type[0],
-            'framework': framework[0],
+            'instance_type': instance_type,
+            'framework': framework,
             'child_edges_type_logits': child_edges_type_logits.shape,
             'child_edges_probs': child_edges_probs.shape,
             'child_edges_preds': child_edges_preds.shape,
@@ -686,7 +673,7 @@ class Resolver(Model):
 
             class_size = self.vocab.get_vocab_size(
                 'dm_resolved_label_edge_labels')
-            for metric in self.child_edges_type_metrics.values():
+            for metric in self.framework2metrics[framework[0]]['child_edge_type'].values():
                 # metric(child_edges_type_logits, resolved_label_edge_labels)
                 logger.info(('child_edges_preds', child_edges_preds.shape))
                 logger.info(
@@ -769,8 +756,8 @@ class Resolver(Model):
 
         if is_single_node_resolve:
             output_dict = {
-                'instance_type': instance_type[0],
-                'framework': framework[0],
+                'instance_type': instance_type,
+                'framework': framework,
                 'resolve_type': 'single_node',
             }
             logger.debug(
@@ -783,7 +770,7 @@ class Resolver(Model):
                 ('resolved_label_root_label', resolved_label_root_label.shape))
             root_label_type_loss = self.root_label_type_loss(
                 propagate_node_label_logits, resolved_label_root_label)
-            for metric in self.root_label_type_metrics.values():
+            for metric in self.framework2metrics[framework[0]]['root_label_type'].values():
                 metric(propagate_node_label_logits, resolved_label_root_label)
             output_dict[
                 'propagate_node_label_logits'] = propagate_node_label_logits
@@ -828,8 +815,8 @@ class Resolver(Model):
         logger.debug((child_edges_type_logits.shape))
 
         output_dict = {
-            'instance_type': instance_type[0],
-            'framework': framework[0],
+            'instance_type': instance_type,
+            'framework': framework,
             'child_edges_type_logits': child_edges_type_logits.shape,
             'child_edges_probs': child_edges_probs.shape,
             'child_edges_preds': child_edges_preds.shape,
@@ -848,7 +835,7 @@ class Resolver(Model):
 
             child_edges_type_loss = self.child_edges_type_loss(
                 child_edges_type_logits, resolved_label_edge_labels)
-            # for metric in self.child_edges_type_metrics.values():
+            # for metric in self.framework2metrics[framework[0]]['child_edge_type'].values():
             #     metric(child_edges_type_logits.transpose(1, 2), resolved_label_edge_labels)
             output_dict['loss'] = child_edges_type_loss
 
@@ -862,8 +849,8 @@ class Resolver(Model):
         Does a simple argmax over the class probabilities, converts indices to string labels, and
         adds a ``"label"`` key to the dictionary with the result.
         """
-        instance_type = output_dict.get('instance_type')
-        framework = output_dict.get('framework')
+        instance_type = output_dict.get('instance_type')[0]
+        framework = output_dict.get('framework')[0]
         if instance_type == 'action':
             class_probabilities = F.softmax(output_dict['action_type_logits'],
                                             dim=-1)
@@ -873,12 +860,24 @@ class Resolver(Model):
             argmax_indices = numpy.argmax(predictions, axis=-1)
             labels = [
                 self.vocab.get_token_from_index(x,
-                                                namespace="action_type_label")
+                                                namespace="action_type_labels")
                 for x in argmax_indices
             ]
             output_dict['label'] = labels
         elif instance_type == 'resolve':
-            pass
+            #logger.error(('output_dict', output_dict.keys()))
+            framework = output_dict['framework'][0]
+            root_node_label_logits = output_dict['root_node_label_logits']
+            class_probabilities = F.softmax(output_dict['root_node_label_logits'], dim=-1)
+            output_dict['root_node_label_class_probabilities'] = class_probabilities
+            predictions = class_probabilities.cpu().data.numpy()
+            argmax_indices = numpy.argmax(predictions, axis=-1)
+            labels = [
+                self.vocab.get_token_from_index(x, namespace="{}_resolved_label_root_label".format(framework))
+                for x in argmax_indices
+            ]
+
+            output_dict['root_node_label'] = labels
         else:
             raise NotImplementedError
 
@@ -886,10 +885,11 @@ class Resolver(Model):
 
     @overrides
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
-        return {
-            metric_name: metric.get_metric(reset)
-            for metric_name, metric in list(self.action_type_metrics.items()) +
-            list(self.action_num_pop_metrics.items()) +
-            list(self.root_label_type_metrics.items()) +
-            list(self.child_edges_type_metrics.items())
-        }
+        output_metrics = {}
+        for framework, metrics in self.framework2metrics.items():
+            for metric_type, metric_dict in metrics.items():
+                for metric_name, metric in metric_dict.items():
+                    metric_value = metric.get_metric(reset)
+                    #logger.error((metric_name, metric_value))
+                    output_metrics[metric_name] = metric.get_metric(reset)
+        return output_metrics

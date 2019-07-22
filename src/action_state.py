@@ -6,6 +6,7 @@ from collections import Counter, defaultdict, deque
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+logger.setLevel(logging.ERROR)
 #logger.setLevel(logging.DEBUG)
 
 UCCA_TOP_NODE_LABEL = '<UCCA-TOP-NODE>'
@@ -131,7 +132,7 @@ def mrp_json2parser_states(
     )
 
     if not token_nodes:
-        return [], {}
+        return 'not token_nodes', [], {}
 
     if tokenized_parse_nodes:
         token_pos = 0
@@ -146,7 +147,7 @@ def mrp_json2parser_states(
             parse_nodes_anchors.append((token_pos, token_pos + label_size))
             if token_pos + label_size > len(doc):
                 logger.warning('doc too big')
-                return [], {}
+                return 'token_pos + label_size > len(doc)', [], {}
             char_pos2tokenized_node_id.extend([node_id] * (label_size))
             token_pos += label_size
     else:
@@ -183,7 +184,7 @@ def mrp_json2parser_states(
     )
     # parser_states, actions = [], []
     if not parser_states:
-        return [], {}
+        return 'not parser_states', [], {}
 
     token_states, curr_node_ids = _simulate_actions(
         framework,
@@ -211,7 +212,7 @@ def mrp_json2parser_states(
         token_states,
         actions,
     )
-    return parser_states, meta_data
+    return 'success', parser_states, meta_data
 
 
 def _top_oriented_edges(edges, edge_id2edge, top_oriented_edge_id_set,

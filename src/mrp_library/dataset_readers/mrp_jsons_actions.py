@@ -16,7 +16,7 @@ from allennlp.models import Model
 from overrides import overrides
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)
 # logger.setLevel(logging.DEBUG)
 
 UNKNOWN_WORD = '<UNKOWN-WORD>'
@@ -247,19 +247,19 @@ class MRPDatasetActionReader(DatasetReader):
         resolved_child_parse_node_ids = []
         resolved_root_parse_node_id = token_state[-1][0]
 
-        logger.warning(('token_state', token_state))
-        if action_num_pop >= 2:
+        logger.info(('token_state', token_state))
+        if action_num_pop > 1:
             for token_node_id, resolved, *_ in token_state[-action_num_pop:]:
-                logger.warning(('token_node_id', token_node_id, resolved))
+                logger.info(('token_node_id', token_node_id, resolved))
                 if resolved:
                     resolved_child_parse_node_ids.append(token_node_id)
                 else:
                     resolved_root_parse_node_id = token_node_id
-        logger.warning(('action_num_pop', action_num_pop))
-        logger.warning(('resolved_child_parse_node_ids',
-                        resolved_child_parse_node_ids))
-        logger.warning(('resolved_root_parse_node_id',
-                        resolved_root_parse_node_id))
+        logger.info(('action_num_pop', action_num_pop))
+        logger.info(('resolved_child_parse_node_ids',
+                     resolved_child_parse_node_ids))
+        logger.info(('resolved_root_parse_node_id',
+                     resolved_root_parse_node_id))
 
         resolved_field_name2metadata[
             'resolved_child_parse_node_ids'] = resolved_child_parse_node_ids
@@ -302,12 +302,12 @@ class MRPDatasetActionReader(DatasetReader):
                 parse_node_field_name)])
             for parse_node_field_name in parse_node_field_name2features)
 
-        logger.warning(('resolved_feature_size', resolved_feature_size))
-        logger.warning(('resolved_root_field_name2features',
-                        resolved_root_field_name2features))
+        logger.info(('resolved_feature_size', resolved_feature_size))
+        logger.info(('resolved_root_field_name2features',
+                     resolved_root_field_name2features))
 
-        logger.warning(('resolved_child_field_name2features',
-                        resolved_child_field_name2features))
+        logger.info(('resolved_child_field_name2features',
+                     resolved_child_field_name2features))
         if predict:
             resolved_edge_label_size = 0
         else:
@@ -334,7 +334,7 @@ class MRPDatasetActionReader(DatasetReader):
 
             if resolved_feature_size != resolved_edge_label_size:
                 pass
-            # logger.warning((resolved_feature_size,
+            # logger.info((resolved_feature_size,
             #                 resolved_edge_label_size))
             # pprint.pprint(
             #     (action_num_pop, resolved_node_position,
@@ -433,7 +433,7 @@ class MRPDatasetActionReader(DatasetReader):
                     resolved_node_position, resolved_node, resolved_edgess)
 
                 if resolved_feature_size != resolved_edge_label_size:
-                    # logger.warning((resolved_feature_size,
+                    # logger.info((resolved_feature_size,
                     #                 resolved_edge_label_size))
                     # pprint.pprint(
                     #     (action_num_pop, resolved_node_position,
@@ -441,7 +441,7 @@ class MRPDatasetActionReader(DatasetReader):
                     #      resolved_root_field_name2features,
                     #      resolved_field_name2label))
                     self.error_count += 1
-                    logger.warning(('error count', self.error_count))
+                    logger.info(('error count', self.error_count))
                 else:
                     action_num_pop_mask = 1
                     yield self.text_to_instance(
@@ -575,6 +575,7 @@ class MRPDatasetActionReader(DatasetReader):
             field_name2field['stack_len'] = MetadataField(len(token_state))
         else:
             field_name2field['stack_len'] = MetadataField(action_num_pop)
+            field_name2field['action_num_pop'] = MetadataField(action_num_pop)
 
         token_node_ids = [token_node[0] for token_node in token_state]
         token_node_childs = [token_node[3] for token_node in token_state]
@@ -614,7 +615,7 @@ class MRPDatasetActionReader(DatasetReader):
                     raise NotImplementedError
                 field_name2field[full_name] = text_field
 
-            logger.warning(field_name2field.keys())
+            logger.info(field_name2field.keys())
             logger.debug(field_name2field['resolved_child_parse_node_labels'])
             logger.debug(
                 resolved_child_field_name2features['parse_node_label'])
